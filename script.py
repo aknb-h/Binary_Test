@@ -1,7 +1,6 @@
 import argparse
 import torch
 import torch.nn as nn
-import torch.optim as optim
 import pandas as pd
 from torch.utils.data import DataLoader, Dataset, random_split
 import numpy as np
@@ -44,7 +43,6 @@ class TransformerModel(nn.Module):
         out = self.fc(x.mean(dim=1))  # 平均プーリング
         return out
 
-
 # データをCSVから読み込む関数
 def load_data(file_path):
     df = pd.read_csv(file_path)
@@ -71,102 +69,24 @@ def load_model(model, path="model.pth"):
     print(f"Model loaded from {path}")
 
 
-# 学習と検証のロスと精度をグラフとして保存
-def save_training_plots(train_losses, val_losses, val_accuracies, output_dir="plots"):
-    os.makedirs(output_dir, exist_ok=True)
-
-    # ロスのプロット
-    plt.figure()
-    plt.plot(train_losses, label='Train Loss')
-    plt.plot(val_losses, label='Validation Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.legend()
-    plt.title('Training and Validation Loss')
-    plt.savefig(os.path.join(output_dir, 'loss_plot.png'))
-    print(f"Loss plot saved to {os.path.join(output_dir, 'loss_plot.png')}")
-
-    # 精度のプロット
-    plt.figure()
-    plt.plot(val_accuracies, label='Validation Accuracy')
-    plt.xlabel('Epoch')
-    plt.ylabel('Accuracy')
-    plt.legend()
-    plt.title('Validation Accuracy')
-    plt.savefig(os.path.join(output_dir, 'accuracy_plot.png'))
-    print(f"Accuracy plot saved to {os.path.join(output_dir, 'accuracy_plot.png')}")
-
-
-# 学習関数
-def train_and_evaluate(model, train_loader, val_loader, test_loader, criterion, optimizer, num_epochs=10, save_path="model.pth"):
-    train_losses = []
-    val_losses = []
-    val_accuracies = []
-
-    for epoch in range(num_epochs):
-        # 学習
-        model.train()
-        train_loss = 0
-        for x, y in train_loader:
-            x = x.unsqueeze(-1)
-            optimizer.zero_grad()
-            outputs = model(x)
-            loss = criterion(outputs, y)
-            loss.backward()
-            optimizer.step()
-            train_loss += loss.item()
-        train_loss /= len(train_loader)
-        train_losses.append(train_loss)
-        print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {train_loss:.4f}")
-
-        # 検証
-        model.eval()
-        val_loss, correct = 0, 0
-        with torch.no_grad():
-            for x, y in val_loader:
-                x = x.unsqueeze(-1)
-                outputs = model(x)
-                loss = criterion(outputs, y)
-                val_loss += loss.item()
-                predicted = torch.argmax(outputs, dim=1)
-                correct += (predicted == y).sum().item()
-        val_loss /= len(val_loader)
-        val_accuracy = correct / len(val_loader.dataset)
-        val_losses.append(val_loss)
-        val_accuracies.append(val_accuracy)
-        print(f"Epoch {epoch+1}/{num_epochs}, Validation Loss: {val_loss:.4f}, Accuracy: {val_accuracy:.4f}")
-
-    # テスト
-    model.eval()
-    test_loss, correct = 0, 0
-    with torch.no_grad():
-        for x, y in test_loader:
-            x = x.unsqueeze(-1)
-            outputs = model(x)
-            loss = criterion(outputs, y)
-            test_loss += loss.item()
-            predicted = torch.argmax(outputs, dim=1)
-            correct += (predicted == y).sum().item()
-    test_loss /= len(test_loader)
-    test_accuracy = correct / len(test_loader.dataset)
-    print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.4f}")
-
-    # モデル保存
-    save_model(model, save_path)
-
-    # プロットを保存
-    save_training_plots(train_losses, val_losses, val_accuracies)
-
-
-# 推論関数
+# 推論関数（スコア付き）
 def predict(model, data, sequence_length):
     model.eval()
     x = data[-sequence_length:]
     x = torch.tensor(x, dtype=torch.float32).unsqueeze(0).unsqueeze(-1)  # (1, seq_len, input_dim)
     with torch.no_grad():
-        output = model(x)
-        predicted = torch.argmax(output, dim=1).item()
-    return "Increase" if predicted == 1 else "Decrease"
+        output = model(x)  # ログits
+        probabilities = torch.softmax(output, dim=1)  # ソフトマックスで確率を計算
+        predicted = torch.argmax(probabilities, dim=1).item()
+        score = probabilities[0, predicted].item()  # 信頼度スコア
+
+    label = "Increase" if predicted == 1 else "Decrease"
+    return label, score
+
+
+# パラメータの数を計算する関数
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
 # メイン処理
@@ -185,31 +105,8 @@ def main():
     sequence_length = 30
     delta = 5
     model = TransformerModel(input_dim=1, embed_dim=64, num_heads=4, hidden_dim=128, num_layers=2, output_dim=2)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-    if args.mode == "train":
-        if args.demo:
-            data = generate_demo_data()
-            print("Training using demo data...")
-        else:
-            data = load_data(args.file_path)
-            print(f"Training using data from {args.file_path}...")
-        
-        # データ分割
-        dataset = TimeSeriesDataset(data, sequence_length, delta)
-        train_size = int(0.7 * len(dataset))
-        val_size = int(0.15 * len(dataset))
-        test_size = len(dataset) - train_size - val_size
-        train_dataset, val_dataset, test_dataset = random_split(dataset, [train_size, val_size, test_size])
-
-        train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-        val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
-        test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
-
-        train_and_evaluate(model, train_loader, val_loader, test_loader, criterion, optimizer, save_path=args.model_path)
-
-    elif args.mode == "infer":
+    if args.mode == "infer":
         load_model(model, args.model_path)
         if args.demo:
             data = generate_demo_data()
@@ -218,8 +115,8 @@ def main():
             data = load_data(args.file_path)
             print(f"Inferring using data from {args.file_path}...")
 
-        prediction = predict(model, data, sequence_length)
-        print(f"Prediction: {prediction}")
+        label, score = predict(model, data, sequence_length)
+        print(f"Prediction: {label}, Score: {score:.4f}")
 
 
 if __name__ == "__main__":
